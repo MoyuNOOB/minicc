@@ -2,6 +2,7 @@ import ast
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,13 @@ ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(ENV_PATH)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+try:
+    from tools.web_search import internet_search
+except Exception:
+    internet_search = None
 
 API_KEY = os.getenv("API_KEY")
 BASE_URL = os.getenv("BASE_URL")
@@ -125,6 +133,7 @@ RECURSION_LIMIT = 50
 
 agent = create_deep_agent(
     model=llm,
+    tools=[internet_search] if internet_search is not None else [],
     system_prompt=SYSTEM_PROMPT_UNIFIED.format(
         workdir=WORKDIR,
         tools=(
@@ -132,9 +141,10 @@ agent = create_deep_agent(
             "- ls/read_file/write_file/edit_file/glob/grep: file operations\n"
             "- execute: run shell commands\n"
             "- task: dispatch focused work to subagents\n"
+            "- internet_search: search web/news/finance via Tavily\n"
             "- skill tools: provided by deepagents skills middleware"
         ),
-        tool_names="write_todos, ls, read_file, write_file, edit_file, glob, grep, execute, task, skill",
+        tool_names="write_todos, ls, read_file, write_file, edit_file, glob, grep, execute, task, internet_search, skill",
         subagent_descriptions=SUBAGENT_DESCRIPTIONS,
         skill_descriptions=SKILL_DESCRIPTIONS,
         input="{input}",
