@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from deepagents import create_deep_agent
-from deepagents.backends.filesystem import FilesystemBackend
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 
 from prompts import SYSTEM_PROMPT_UNIFIED
+from code.sandbox_backend import SimpleSandboxBackend
 
 
 ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
@@ -32,7 +32,7 @@ BASE_URL = os.getenv("BASE_URL")
 MODEL = os.getenv("MODEL_NAME", "kimi-k2-turbo-preview")
 WORKDIR = Path.cwd()
 SKILLS_DIR = PROJECT_ROOT / "skills"
-BACKEND = FilesystemBackend(root_dir=PROJECT_ROOT, virtual_mode=True)
+BACKEND = SimpleSandboxBackend(root_dir=PROJECT_ROOT, virtual_mode=True)
 
 llm = ChatAnthropic(api_key=API_KEY, base_url=BASE_URL, model=MODEL)
 
