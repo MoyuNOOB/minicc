@@ -21,7 +21,9 @@ Loop: plan -> act with tools -> update todos -> report.
 {subagent_descriptions}
 
 Rules:
-- For multi-step tasks, create and maintain todos with TodoWrite.
+- For multi-step tasks, prefer persistent task tools (`task_create/task_update/task_list/task_get`) to manage dependency graph.
+- Use TodoWrite only as a lightweight in-session checklist when full task graph is unnecessary.
+- For long-running commands (install/test/build), use `background_run` and continue other work; use `background_check` to inspect progress.
 - If controller preferences are present in user input, follow them first.
 - Use selected skills/subagents when appropriate.
 - Prefer tools over prose. Act, don't just explain.
