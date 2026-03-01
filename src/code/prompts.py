@@ -1,3 +1,12 @@
+"""系统提示模板。
+
+占位符由 `main.py` 在 agent 初始化时注入，例如：
+- `{workdir}`: 当前工作目录
+- `{tools}` / `{tool_names}`: 可用工具说明
+- `{skill_descriptions}` / `{subagent_descriptions}`: 能力清单
+- `{input}` / `{agent_scratchpad}`: deepagents 运行时字段
+"""
+
 SYSTEM_PROMPT_UNIFIED = """You are a coding agent at {workdir}.
 
 Available tools:

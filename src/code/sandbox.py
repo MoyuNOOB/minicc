@@ -38,14 +38,31 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
         root_dir: str | Path | None = None,
         *,
         virtual_mode: bool = True,
+        refresh_each_execute: bool = True,
         timeout: float = 30.0,
         max_output_bytes: int = 100_000,
         cpu_time_limit_seconds: int = 10,
         memory_limit_mb: int = 512,
         file_size_limit_mb: int = 16,
     ) -> None:
+        """初始化沙箱后端实例。
+
+        Args:
+            root_dir: 文件工具作用的根目录。
+            virtual_mode: 是否使用虚拟文件模式（由父类处理）。
+            refresh_each_execute: 是否在每次 execute 前重建 workspace。
+            timeout: 单条命令超时时间（秒）。
+            max_output_bytes: 输出最大字节数，超出会截断。
+            cpu_time_limit_seconds: 子进程 CPU 时间上限（秒）。
+            memory_limit_mb: 子进程内存上限（MB）。
+            file_size_limit_mb: 子进程可写文件大小上限（MB）。
+
+        Returns:
+            None。
+        """
         super().__init__(root_dir=root_dir, virtual_mode=virtual_mode)
         self._timeout = timeout
+        self._refresh_each_execute = refresh_each_execute
         self._max_output_bytes = max_output_bytes
         self._cpu_time_limit_seconds = cpu_time_limit_seconds
         self._memory_limit_bytes = memory_limit_mb * 1024 * 1024
@@ -57,13 +74,34 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
 
     @property
     def id(self) -> str:
+        """返回当前沙箱实例 ID。
+
+        Returns:
+            唯一沙箱 ID 字符串。
+        """
         return self._sandbox_id
 
     def _is_command_blocked(self, command: str) -> bool:
+        """判断命令是否命中阻断策略。
+
+        Args:
+            command: 待执行命令。
+
+        Returns:
+            `True` 表示命中黑名单策略，不允许执行。
+        """
         lowered = command.lower()
         return any(re.search(pattern, lowered) for pattern in self._BLOCKED_PATTERNS)
 
     def _refresh_workspace(self) -> None:
+        """重建隔离工作区并复制当前仓库快照。
+
+        Args:
+            None。
+
+        Returns:
+            None。
+        """
         if self._workspace.exists():
             shutil.rmtree(self._workspace)
 
@@ -78,6 +116,14 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
         shutil.copytree(self.cwd, self._workspace, symlinks=False, ignore=ignore)
 
     def _build_env(self) -> dict[str, str]:
+        """构建子进程执行环境变量。
+
+        Args:
+            None。
+
+        Returns:
+            传给子进程的环境变量字典。
+        """
         path_value = os.environ.get("PATH", "/usr/bin:/bin")
         return {
             "PATH": path_value,
@@ -87,6 +133,14 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
         }
 
     def _preexec_limits(self) -> None:
+        """在子进程执行前设置资源限制。
+
+        Args:
+            None。
+
+        Returns:
+            None。
+        """
         resource.setrlimit(
             resource.RLIMIT_CPU,
             (self._cpu_time_limit_seconds, self._cpu_time_limit_seconds),
@@ -104,6 +158,14 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
             pass
 
     def execute(self, command: str) -> ExecuteResponse:
+        """在隔离工作区内执行命令并返回统一结果。
+
+        Args:
+            command: 待执行的 shell 命令。
+
+        Returns:
+            `ExecuteResponse`，包含输出、退出码和是否截断。
+        """
         if not isinstance(command, str) or not command.strip():
             return ExecuteResponse(output="Error: Command must be a non-empty string.", exit_code=1, truncated=False)
 
@@ -115,7 +177,8 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
             )
 
         try:
-            self._refresh_workspace()
+            if self._refresh_each_execute or not self._workspace.exists():
+                self._refresh_workspace()
             result = subprocess.run(  # noqa: S602
                 command,
                 shell=True,
@@ -153,4 +216,3 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
             output = f"{output.rstrip()}\n\nExit code: {result.returncode}"
 
         return ExecuteResponse(output=output, exit_code=result.returncode, truncated=truncated)
-
