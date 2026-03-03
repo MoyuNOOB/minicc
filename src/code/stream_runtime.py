@@ -178,6 +178,7 @@ def stream_with_retry(
             printed_index = start_index
             final_messages: list[Any] = history
 
+            # 流式调用agent执行
             for chunk in agent.stream(
                 {"messages": history},
                 {"recursion_limit": recursion_limit},
@@ -188,12 +189,20 @@ def stream_with_retry(
                 messages = chunk.get("messages")
                 if not isinstance(messages, list):
                     continue
-
+                
                 if len(messages) > printed_index:
                     on_messages(messages, printed_index)
                     printed_index = len(messages)
 
                 final_messages = messages
+
+            # In `stream_mode="values"`, the last message can be updated in-place
+            # without increasing message count. Refresh the last message once after
+            # stream ends to avoid showing only an early partial fragment.
+            if final_messages and len(final_messages) == printed_index:
+                refresh_index = max(start_index, len(final_messages) - 1)
+                if refresh_index < len(final_messages):
+                    on_messages(final_messages, refresh_index)
 
             last_error = None
             return final_messages

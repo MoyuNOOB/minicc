@@ -32,8 +32,9 @@ from src.code.subagents import (
     handle_subagent_command,
     to_deepagents_subagents,
 )
+from src.code.session_helpers import inject_background_notifications, render_compact_status
 from src.code.todos import TodoRenderState
-from src.code.tools import ToolRenderState, print_turn, stream_with_retry
+from src.code.stream_runtime import ToolRenderState, print_turn, stream_with_retry
 
 
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -76,7 +77,7 @@ SUBAGENT_SKILLS = {
 SUBAGENT_DESCRIPTIONS = build_subagent_descriptions(SUBAGENTS)
 SKILL_DESCRIPTIONS = build_skill_descriptions(SKILLS)
 
-RECURSION_LIMIT = 50
+RECURSION_LIMIT = int(os.getenv("RECURSION_LIMIT", "200"))
 
 llm = ChatAnthropic(api_key=API_KEY, base_url=BASE_URL, model=MODEL)
 compactor = build_context_compactor(llm, WORKDIR)
@@ -119,40 +120,6 @@ agent = create_deep_agent(
     backend=BACKEND,
 )
 
-
-def render_compact_status() -> str:
-    """渲染上下文压缩配置状态。"""
-    return (
-        "[compact] "
-        f"threshold={compactor.threshold} "
-        f"keep_recent={compactor.keep_recent_tool_results} "
-        f"source_chars={compactor.max_summary_source_chars} "
-        f"dir={compactor.transcript_dir}"
-    )
-
-
-def inject_background_notifications(history: list[dict[str, str]]) -> int:
-    """把已完成后台任务结果注入到下一次 LLM 调用上下文。"""
-    notifications = background_manager.drain_notifications()
-    if not notifications:
-        return 0
-
-    lines = []
-    for item in notifications:
-        lines.append(
-            f"[bg:{item['task_id']}] status={item['status']} command={item['command']} result={item['result']}"
-        )
-    notif_text = "\n".join(lines)
-    history.append(
-        {
-            "role": "user",
-            "content": f"<background-results>\n{notif_text}\n</background-results>",
-        }
-    )
-    history.append({"role": "assistant", "content": "Noted background results."})
-    return len(notifications)
-
-
 def main() -> None:
     """运行交互式命令行会话。
 
@@ -170,6 +137,7 @@ def main() -> None:
     print("Commands: /skill, /subagent, /status, /compact")
     print(f"Sandbox refresh_each_execute: {SANDBOX_REFRESH_EACH_EXECUTE}")
     print(f"Tasks directory: {TASKS_DIR}")
+    print(f"Agent recursion_limit: {RECURSION_LIMIT}")
 
     history: list[dict[str, str]] = []
     selected_skill: str | None = None
@@ -189,7 +157,7 @@ def main() -> None:
 
         if user_input.strip().lower() == "/status":
             print("\n" + render_active_selection(selected_skill, selected_subagent))
-            print(render_compact_status())
+            print(render_compact_status(compactor))
             print()
             continue
 
@@ -221,10 +189,11 @@ def main() -> None:
 
         routed_input = build_routed_input(task_text or user_input, selected_skill, selected_subagent)
 
-        injected_count = inject_background_notifications(history)
+        injected_count = inject_background_notifications(history, background_manager)
         if injected_count:
             print(f"[background] injected {injected_count} finished task result(s).")
 
+        # 每轮把用户输入写入history
         history.append({"role": "user", "content": routed_input})
         compactor.micro_compact(history)
         history, auto_compacted = compactor.maybe_auto_compact(history)
@@ -249,6 +218,12 @@ def main() -> None:
         except json.JSONDecodeError:
             print("Error: API 返回内容为空或格式错误，请稍后重试。")
         except Exception as exc:
+            if "Recursion limit" in str(exc):
+                print(
+                    "Error: Agent reached recursion limit before finishing. "
+                    "Try narrowing the task scope, selecting a skill/subagent explicitly, "
+                    "or increasing RECURSION_LIMIT in .env."
+                )
             print(f"Error during agent invoke: {exc}")
 
         print(render_active_selection(selected_skill, selected_subagent))
