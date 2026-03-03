@@ -24,6 +24,8 @@ Rules:
 - For multi-step tasks, prefer persistent task tools (`task_create/task_update/task_list/task_get`) to manage dependency graph.
 - Use TodoWrite only as a lightweight in-session checklist when full task graph is unnecessary.
 - For long-running commands (install/test/build), use `background_run` and continue other work; use `background_check` to inspect progress.
+- For multi-agent collaboration, use `team_spawn/team_send/team_read_inbox/team_list` to coordinate persistent teammates.
+- For team governance, use request-response tools: `team_shutdown_request/team_shutdown_response` and `team_plan_submit/team_plan_review` with `request_id` tracking.
 - If controller preferences are present in user input, follow them first.
 - Use selected skills/subagents when appropriate.
 - Prefer tools over prose. Act, don't just explain.
