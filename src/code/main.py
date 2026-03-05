@@ -21,6 +21,8 @@ from src.code.context_compact import build_context_compactor
 from src.code.task_system import TaskManager, build_task_tools
 from src.code.teams import MessageBus, TeammateManager, build_team_tools, inject_lead_inbox_messages
 from src.code.team_protocols import TeamProtocolManager, build_team_protocol_tools
+from src.code.auto_agents import AutonomousAgentManager, build_autonomous_tools, inject_autonomous_events
+from src.code.worktrees import WorktreeManager, build_worktree_tools
 from src.code.skills import (
     build_skill_aliases,
     build_skill_descriptions,
@@ -60,6 +62,7 @@ WORKDIR = Path.cwd()
 SKILLS_DIR = PROJECT_ROOT / "src" / "skills"
 TASKS_DIR = WORKDIR / ".tasks"
 TEAM_DIR = WORKDIR / ".team"
+WORKTREES_DIR = WORKDIR / ".worktrees"
 BACKEND = SimpleSandboxBackend(
     root_dir=PROJECT_ROOT,
     virtual_mode=True,
@@ -93,8 +96,19 @@ message_bus = MessageBus(TEAM_DIR / "inbox")
 team_tools = build_team_tools(teammate_manager, message_bus)
 team_protocol_manager = TeamProtocolManager(TEAM_DIR, message_bus, teammate_manager)
 team_protocol_tools = build_team_protocol_tools(team_protocol_manager)
+autonomous_manager = AutonomousAgentManager(teammate_manager, task_manager, message_bus)
+autonomous_tools = build_autonomous_tools(autonomous_manager)
+worktree_manager = WorktreeManager(PROJECT_ROOT, WORKTREES_DIR, task_manager)
+worktree_tools = build_worktree_tools(worktree_manager)
 
-agent_tools = [*task_tools, *background_tools, *team_tools, *team_protocol_tools]
+agent_tools = [
+    *task_tools,
+    *background_tools,
+    *team_tools,
+    *team_protocol_tools,
+    *autonomous_tools,
+    *worktree_tools,
+]
 if internet_search is not None:
     agent_tools.append(internet_search)
 
@@ -112,6 +126,8 @@ agent = create_deep_agent(
             "- background_run/background_check: run long commands asynchronously\n"
             "- team_spawn/team_list/team_send/team_read_inbox: persistent teammates + mailbox\n"
             "- team_shutdown_request/team_shutdown_response/team_plan_submit/team_plan_review/team_protocol_list: team protocols\n"
+            "- idle/claim_task/auto_scan_unclaimed_tasks/team_auto_tick: autonomous teammate scheduling\n"
+            "- worktree_create/worktree_list/worktree_run/worktree_keep/worktree_remove/worktree_events: isolated git worktrees bound to tasks\n"
             "- internet_search: search web/news/finance via Tavily\n"
             "- skill tools: provided by deepagents skills middleware"
         ),
@@ -121,6 +137,8 @@ agent = create_deep_agent(
             "background_run, background_check, "
             "team_spawn, team_list, team_send, team_read_inbox, "
             "team_shutdown_request, team_shutdown_response, team_plan_submit, team_plan_review, team_protocol_list, "
+            "idle, claim_task, auto_scan_unclaimed_tasks, team_auto_tick, "
+            "worktree_create, worktree_list, worktree_run, worktree_keep, worktree_remove, worktree_events, "
             "internet_search, skill"
         ),
         subagent_descriptions=SUBAGENT_DESCRIPTIONS,
@@ -151,6 +169,7 @@ def main() -> None:
     print(f"Sandbox refresh_each_execute: {SANDBOX_REFRESH_EACH_EXECUTE}")
     print(f"Tasks directory: {TASKS_DIR}")
     print(f"Team directory: {TEAM_DIR}")
+    print(f"Worktrees directory: {WORKTREES_DIR}")
     print(f"Agent recursion_limit: {RECURSION_LIMIT}")
 
     history: list[dict[str, str]] = []
@@ -234,6 +253,11 @@ def main() -> None:
         team_injected_count = inject_lead_inbox_messages(history, message_bus, lead_name="lead")
         if team_injected_count:
             print(f"[team] injected {team_injected_count} inbox message(s).")
+
+        autonomous_events = autonomous_manager.tick_idle_teammates()
+        autonomous_injected_count = inject_autonomous_events(history, autonomous_events)
+        if autonomous_injected_count:
+            print(f"[autonomy] injected {autonomous_injected_count} scheduler event(s).")
 
         # 每轮把用户输入写入history
         history.append({"role": "user", "content": routed_input})

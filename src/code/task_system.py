@@ -133,6 +133,7 @@ class TaskManager:
             "blockedBy": [],
             "blocks": [],
             "owner": owner.strip(),
+            "worktree": "",
         }
         self._save(task)
 
@@ -191,6 +192,42 @@ class TaskManager:
 
     def get(self, task_id: int) -> dict[str, Any]:
         return self._load(task_id)
+
+    def claim_task(self, task_id: int, owner: str) -> dict[str, Any]:
+        owner_name = (owner or "").strip()
+        if not owner_name:
+            raise ValueError("owner is required")
+
+        task = self._load(task_id)
+        if task.get("status") != "pending":
+            raise ValueError(f"Task {task_id} is not pending")
+        if task.get("blockedBy"):
+            raise ValueError(f"Task {task_id} is blocked by dependencies")
+        if task.get("owner"):
+            raise ValueError(f"Task {task_id} is already owned by {task.get('owner')}")
+
+        task["owner"] = owner_name
+        task["status"] = "in_progress"
+        self._save(task)
+        return task
+
+    def bind_worktree(self, task_id: int, worktree: str) -> dict[str, Any]:
+        worktree_name = (worktree or "").strip()
+        if not worktree_name:
+            raise ValueError("worktree is required")
+
+        task = self._load(task_id)
+        task["worktree"] = worktree_name
+        if task.get("status") == "pending":
+            task["status"] = "in_progress"
+        self._save(task)
+        return task
+
+    def unbind_worktree(self, task_id: int) -> dict[str, Any]:
+        task = self._load(task_id)
+        task["worktree"] = ""
+        self._save(task)
+        return task
 
     def list_all(self) -> dict[str, Any]:
         tasks = self._iter_tasks()
