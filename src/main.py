@@ -3,12 +3,11 @@
 import json
 import os
 import sys
-import time
 import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -16,32 +15,39 @@ from deepagents import create_deep_agent
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 
-from src.code.prompts import SYSTEM_PROMPT_UNIFIED
-from src.code.sandbox import SimpleSandboxBackend
-from src.code.controller import build_routed_input, parse_selection_command, render_active_selection
-from src.code.background_tasks import BackgroundManager, build_background_tools
-from src.code.context_compact import build_context_compactor
-from src.code.task_system import TaskManager, build_task_tools
-from src.code.teams import MessageBus, TeammateManager, build_team_tools, inject_lead_inbox_messages
-from src.code.team_protocols import TeamProtocolManager, build_team_protocol_tools
-from src.code.auto_agents import AutonomousAgentManager, build_autonomous_tools, inject_autonomous_events
-from src.code.worktrees import WorktreeManager, build_worktree_tools
-from src.code.skills import (
+from src.agent.prompts import SYSTEM_PROMPT_UNIFIED
+from src.exec.sandbox import SimpleSandboxBackend
+from src.runtime.controller import build_routed_input, parse_selection_command, render_active_selection
+from src.exec.background_tasks import BackgroundManager, build_background_tools
+from src.session.context_compact import build_context_compactor
+from src.collab.task_system import TaskManager, build_task_tools
+from src.collab.teams import MessageBus, TeammateManager, build_team_tools, inject_lead_inbox_messages
+from src.collab.team_protocols import TeamProtocolManager, build_team_protocol_tools
+from src.collab.auto_agents import AutonomousAgentManager, build_autonomous_tools, inject_autonomous_events
+from src.exec.worktrees import WorktreeManager, build_worktree_tools
+from src.agent.skills import (
     build_skill_aliases,
     build_skill_descriptions,
     discover_skills,
     handle_skill_command,
 )
-from src.code.subagents import (
+from src.agent.subagents import (
     DEFAULT_SUBAGENTS,
     build_subagent_by_name,
     build_subagent_descriptions,
     handle_subagent_command,
     to_deepagents_subagents,
 )
-from src.code.session_helpers import inject_background_notifications, render_compact_status
-from src.code.todos import TodoRenderState
-from src.code.stream_runtime import ToolRenderState, print_turn, stream_with_retry
+from src.runtime.session_helpers import inject_background_notifications, render_compact_status
+from src.session.todos import TodoRenderState
+from src.runtime.stream_runtime import ToolRenderState, print_turn, stream_with_retry
+from src.session.history import (
+    count_history_messages,
+    find_latest_history_file,
+    list_history_files,
+    load_session_history,
+    save_session_history,
+)
 
 
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -157,57 +163,6 @@ agent = create_deep_agent(
     backend=BACKEND,
 )
 
-
-def _to_serializable_message(message: Any) -> dict[str, Any]:
-    if isinstance(message, dict):
-        return message
-    try:
-        dumped = message.model_dump()
-        if isinstance(dumped, dict):
-            return dumped
-    except Exception:
-        pass
-    role = getattr(message, "type", getattr(message, "role", "assistant"))
-    content = getattr(message, "content", "")
-    return {"role": role, "content": content}
-
-
-def save_session_history(path: Path, messages: list[Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as file:
-        for message in messages:
-            payload = _to_serializable_message(message)
-            file.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
-
-
-def load_session_history(path: Path) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = []
-    if not path.exists():
-        return messages
-    with path.open("r", encoding="utf-8") as file:
-        for line in file:
-            text = line.strip()
-            if not text:
-                continue
-            try:
-                payload = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                messages.append(payload)
-    return messages
-
-
-def find_latest_history_file(history_dir: Path, current_file: Path) -> Path | None:
-    candidates = [
-        path
-        for path in history_dir.glob("*.jsonl")
-        if path.is_file() and path.resolve() != current_file.resolve()
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda path: path.stat().st_mtime)
-
 def main() -> None:
     """运行交互式命令行会话。
 
@@ -222,7 +177,7 @@ def main() -> None:
     print("Mini Claude v5 (deepagents) - interactive. Type 'exit' to quit.\n")
     print(f"Loaded env from: {ENV_PATH}")
     print("Skills source: /src/skills (deepagents managed)")
-    print("Commands: /skill, /subagent, /status, /compact, /resume, /team, /inbox")
+    print("Commands: /skill, /subagent, /status, /compact, /history, /resume, /background, /team, /inbox")
     print(f"Sandbox session_id: {SANDBOX_SESSION_ID}")
     print(f"Sandbox workdir: {SANDBOX_WORKDIR}")
     print(f"History file: {HISTORY_SESSION_FILE}")
@@ -265,6 +220,13 @@ def main() -> None:
             print()
             continue
 
+        if user_input.strip().lower() == "/background":
+            print("\nBackground Tasks:")
+            print(background_manager.check())
+            print(render_active_selection(selected_skill, selected_subagent))
+            print()
+            continue
+
         if user_input.strip().lower() == "/inbox":
             inbox = message_bus.read_inbox("lead", drain=True)
             print("\nLead Inbox:")
@@ -277,10 +239,55 @@ def main() -> None:
             print()
             continue
 
-        if user_input.strip().lower() == "/resume":
-            latest_file = find_latest_history_file(HISTORY_DIR, HISTORY_SESSION_FILE)
+        if user_input.startswith("/history"):
+            parts = user_input.split(maxsplit=1)
+            limit = 10
+            if len(parts) == 2:
+                try:
+                    limit = max(1, int(parts[1].strip()))
+                except ValueError:
+                    print("Usage: /history [limit]")
+                    print(render_active_selection(selected_skill, selected_subagent))
+                    print()
+                    continue
+
+            items = list_history_files(HISTORY_DIR, limit=limit)
+            print("\nHistory Sessions:")
+            if not items:
+                print("(empty)")
+            else:
+                for index, path in enumerate(items, start=1):
+                    mtime = path.stat().st_mtime
+                    updated_at = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                    message_count = count_history_messages(path)
+                    current_mark = " (current)" if path.resolve() == HISTORY_SESSION_FILE.resolve() else ""
+                    print(
+                        f"{index}. {path.name}{current_mark} | "
+                        f"messages={message_count} | updated={updated_at}"
+                    )
+            print(render_active_selection(selected_skill, selected_subagent))
+            print()
+            continue
+
+        if user_input.startswith("/resume"):
+            parts = user_input.split(maxsplit=1)
+            target = parts[1].strip() if len(parts) == 2 else ""
+
+            latest_file = None
+            if not target:
+                latest_file = find_latest_history_file(HISTORY_DIR, HISTORY_SESSION_FILE)
+            elif target.isdigit():
+                items = list_history_files(HISTORY_DIR, limit=max(1, int(target)), exclude=HISTORY_SESSION_FILE)
+                position = int(target)
+                if 1 <= position <= len(items):
+                    latest_file = items[position - 1]
+            else:
+                candidate = HISTORY_DIR / target
+                if candidate.exists() and candidate.is_file() and candidate.resolve() != HISTORY_SESSION_FILE.resolve():
+                    latest_file = candidate
+
             if latest_file is None:
-                print("No previous session found in .history.")
+                print("No matching previous session found. Use /history to list sessions.")
             else:
                 resumed = load_session_history(latest_file)
                 if not resumed:
@@ -288,8 +295,7 @@ def main() -> None:
                 else:
                     history = resumed
                     save_session_history(HISTORY_SESSION_FILE, history)
-                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(latest_file.stat().st_mtime))
-                    print(f"Resumed {len(history)} messages from: {latest_file} (updated: {ts})")
+                    print(f"Resumed {len(history)} messages from: {latest_file}")
             print(render_active_selection(selected_skill, selected_subagent))
             print()
             continue

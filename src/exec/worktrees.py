@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from src.code.task_system import TaskManager
+from src.collab.task_system import TaskManager
 
 
 INDEX_FILE = "index.json"

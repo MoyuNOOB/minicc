@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from src.code.teams import MessageBus, TeammateManager
+from src.collab.teams import MessageBus, TeammateManager
 
 
 PROTOCOLS_FILE = "protocols.json"

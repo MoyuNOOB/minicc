@@ -7,8 +7,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from src.code.task_system import TaskManager
-from src.code.teams import MessageBus, TeammateManager
+from src.collab.task_system import TaskManager
+from src.collab.teams import MessageBus, TeammateManager
 
 
 @dataclass

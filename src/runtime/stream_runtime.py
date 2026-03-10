@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from src.code.todos import TodoRenderState, render_todos, todos_updates_from_messages
+from src.session.todos import TodoRenderState, render_todos, todos_updates_from_messages
 
 
 @dataclass
