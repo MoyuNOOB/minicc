@@ -3,10 +3,7 @@ from __future__ import annotations
 import os
 import re
 import resource
-import shutil
 import subprocess
-import tempfile
-import uuid
 from pathlib import Path
 
 from deepagents.backends.filesystem import FilesystemBackend
@@ -14,12 +11,11 @@ from deepagents.backends.protocol import ExecuteResponse, SandboxBackendProtocol
 
 
 class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
-    """A minimal local sandbox backend for command execution.
+    """A minimal local backend for command execution.
 
     Notes:
-    - File tools (`read_file`, `write_file`, etc.) still operate on `root_dir`.
-    - `execute` runs inside an isolated temp workspace snapshot of `root_dir`.
-    - This is a lightweight sandbox, not a full OS/container isolation boundary.
+    - File tools (`read_file`, `write_file`, etc.) operate on `root_dir`.
+    - `execute` runs directly in `root_dir` without temp snapshot isolation.
     """
 
     _BLOCKED_PATTERNS = [
@@ -38,7 +34,6 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
         root_dir: str | Path | None = None,
         *,
         virtual_mode: bool = True,
-        refresh_each_execute: bool = True,
         timeout: float = 30.0,
         max_output_bytes: int = 100_000,
         cpu_time_limit_seconds: int = 10,
@@ -50,7 +45,6 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
         Args:
             root_dir: 文件工具作用的根目录。
             virtual_mode: 是否使用虚拟文件模式（由父类处理）。
-            refresh_each_execute: 是否在每次 execute 前重建 workspace。
             timeout: 单条命令超时时间（秒）。
             max_output_bytes: 输出最大字节数，超出会截断。
             cpu_time_limit_seconds: 子进程 CPU 时间上限（秒）。
@@ -62,15 +56,14 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
         """
         super().__init__(root_dir=root_dir, virtual_mode=virtual_mode)
         self._timeout = timeout
-        self._refresh_each_execute = refresh_each_execute
         self._max_output_bytes = max_output_bytes
         self._cpu_time_limit_seconds = cpu_time_limit_seconds
         self._memory_limit_bytes = memory_limit_mb * 1024 * 1024
         self._file_size_limit_bytes = file_size_limit_mb * 1024 * 1024
-        self._sandbox_id = f"simple-sandbox-{uuid.uuid4().hex[:8]}"
-        self._sandbox_base = Path(tempfile.gettempdir()) / self._sandbox_id
-        self._workspace = self._sandbox_base / "workspace"
-        self._sandbox_base.mkdir(parents=True, exist_ok=True)
+        self._sandbox_id = "simple-local-workspace"
+        self._sandbox_base = self.cwd
+        self._workspace = self.cwd
+        self._workspace.mkdir(parents=True, exist_ok=True)
 
     @property
     def id(self) -> str:
@@ -94,7 +87,7 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
         return any(re.search(pattern, lowered) for pattern in self._BLOCKED_PATTERNS)
 
     def _refresh_workspace(self) -> None:
-        """重建隔离工作区并复制当前仓库快照。
+        """确保工作区目录存在。
 
         Args:
             None。
@@ -102,18 +95,24 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
         Returns:
             None。
         """
-        if self._workspace.exists():
-            shutil.rmtree(self._workspace)
+        self._workspace.mkdir(parents=True, exist_ok=True)
 
-        ignore = shutil.ignore_patterns(
-            ".git",
-            ".venv",
-            "__pycache__",
-            ".pytest_cache",
-            ".mypy_cache",
-            ".sandbox",
-        )
-        shutil.copytree(self.cwd, self._workspace, symlinks=False, ignore=ignore)
+    def _resolve_path(self, key: str) -> Path:
+        """Resolve tool file path and normalize sandbox-root absolute paths.
+
+        If the model passes an absolute path under `self.cwd`, rewrite it to a
+        root-relative virtual path so files are created directly under workspace
+        instead of nesting full absolute path fragments.
+        """
+        path = Path(key)
+        if path.is_absolute():
+            try:
+                relative = path.resolve().relative_to(self.cwd)
+            except ValueError:
+                pass
+            else:
+                key = str(relative)
+        return super()._resolve_path(key)
 
     def _build_env(self) -> dict[str, str]:
         """构建子进程执行环境变量。
@@ -128,7 +127,7 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
         return {
             "PATH": path_value,
             "HOME": str(self._sandbox_base),
-            "TMPDIR": str(self._sandbox_base),
+            "TMPDIR": str(self._workspace),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
 
@@ -158,7 +157,7 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
             pass
 
     def execute(self, command: str) -> ExecuteResponse:
-        """在隔离工作区内执行命令并返回统一结果。
+        """在工作区目录内执行命令并返回统一结果。
 
         Args:
             command: 待执行的 shell 命令。
@@ -177,7 +176,7 @@ class SimpleSandboxBackend(FilesystemBackend, SandboxBackendProtocol):
             )
 
         try:
-            if self._refresh_each_execute or not self._workspace.exists():
+            if not self._workspace.exists():
                 self._refresh_workspace()
             result = subprocess.run(  # noqa: S602
                 command,

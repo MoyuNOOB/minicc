@@ -3,7 +3,10 @@
 import json
 import os
 import sys
+import time
+import uuid
 from pathlib import Path
+from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -52,21 +55,22 @@ except Exception:
 API_KEY = os.getenv("API_KEY")
 BASE_URL = os.getenv("BASE_URL")
 MODEL = os.getenv("MODEL_NAME", "kimi-k2-turbo-preview")
-SANDBOX_REFRESH_EACH_EXECUTE = os.getenv("SANDBOX_REFRESH_EACH_EXECUTE", "true").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
 WORKDIR = Path.cwd()
+HISTORY_DIR = WORKDIR / ".history"
+HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+SANDBOX_ROOT = PROJECT_ROOT / "workspace"
+SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
+SANDBOX_SESSION_ID = f"session-{uuid.uuid4().hex[:8]}"
+SANDBOX_WORKDIR = SANDBOX_ROOT / SANDBOX_SESSION_ID
+SANDBOX_WORKDIR.mkdir(parents=True, exist_ok=True)
+HISTORY_SESSION_FILE = HISTORY_DIR / f"{SANDBOX_SESSION_ID}.jsonl"
 SKILLS_DIR = PROJECT_ROOT / "src" / "skills"
 TASKS_DIR = WORKDIR / ".tasks"
 TEAM_DIR = WORKDIR / ".team"
 WORKTREES_DIR = WORKDIR / ".worktrees"
 BACKEND = SimpleSandboxBackend(
-    root_dir=PROJECT_ROOT,
-    virtual_mode=True,
-    refresh_each_execute=SANDBOX_REFRESH_EACH_EXECUTE,
+    root_dir=SANDBOX_WORKDIR,
+    virtual_mode=False,
 )
 
 SKILLS = discover_skills(SKILLS_DIR)
@@ -117,6 +121,8 @@ agent = create_deep_agent(
     tools=agent_tools,
     system_prompt=SYSTEM_PROMPT_UNIFIED.format(
         workdir=WORKDIR,
+        sandbox_workdir=SANDBOX_WORKDIR,
+        sandbox_session_id=SANDBOX_SESSION_ID,
         tools=(
             "- write_todos: manage todo list\n"
             "- ls/read_file/write_file/edit_file/glob/grep: file operations\n"
@@ -151,6 +157,57 @@ agent = create_deep_agent(
     backend=BACKEND,
 )
 
+
+def _to_serializable_message(message: Any) -> dict[str, Any]:
+    if isinstance(message, dict):
+        return message
+    try:
+        dumped = message.model_dump()
+        if isinstance(dumped, dict):
+            return dumped
+    except Exception:
+        pass
+    role = getattr(message, "type", getattr(message, "role", "assistant"))
+    content = getattr(message, "content", "")
+    return {"role": role, "content": content}
+
+
+def save_session_history(path: Path, messages: list[Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        for message in messages:
+            payload = _to_serializable_message(message)
+            file.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+
+
+def load_session_history(path: Path) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    if not path.exists():
+        return messages
+    with path.open("r", encoding="utf-8") as file:
+        for line in file:
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                messages.append(payload)
+    return messages
+
+
+def find_latest_history_file(history_dir: Path, current_file: Path) -> Path | None:
+    candidates = [
+        path
+        for path in history_dir.glob("*.jsonl")
+        if path.is_file() and path.resolve() != current_file.resolve()
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
 def main() -> None:
     """运行交互式命令行会话。
 
@@ -165,8 +222,10 @@ def main() -> None:
     print("Mini Claude v5 (deepagents) - interactive. Type 'exit' to quit.\n")
     print(f"Loaded env from: {ENV_PATH}")
     print("Skills source: /src/skills (deepagents managed)")
-    print("Commands: /skill, /subagent, /status, /compact, /team, /inbox")
-    print(f"Sandbox refresh_each_execute: {SANDBOX_REFRESH_EACH_EXECUTE}")
+    print("Commands: /skill, /subagent, /status, /compact, /resume, /team, /inbox")
+    print(f"Sandbox session_id: {SANDBOX_SESSION_ID}")
+    print(f"Sandbox workdir: {SANDBOX_WORKDIR}")
+    print(f"History file: {HISTORY_SESSION_FILE}")
     print(f"Tasks directory: {TASKS_DIR}")
     print(f"Team directory: {TEAM_DIR}")
     print(f"Worktrees directory: {WORKTREES_DIR}")
@@ -218,6 +277,23 @@ def main() -> None:
             print()
             continue
 
+        if user_input.strip().lower() == "/resume":
+            latest_file = find_latest_history_file(HISTORY_DIR, HISTORY_SESSION_FILE)
+            if latest_file is None:
+                print("No previous session found in .history.")
+            else:
+                resumed = load_session_history(latest_file)
+                if not resumed:
+                    print(f"Found session file but no valid messages: {latest_file}")
+                else:
+                    history = resumed
+                    save_session_history(HISTORY_SESSION_FILE, history)
+                    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(latest_file.stat().st_mtime))
+                    print(f"Resumed {len(history)} messages from: {latest_file} (updated: {ts})")
+            print(render_active_selection(selected_skill, selected_subagent))
+            print()
+            continue
+
         if user_input.startswith("/compact"):
             parts = user_input.split(maxsplit=1)
             focus = parts[1].strip() if len(parts) == 2 else None
@@ -225,6 +301,7 @@ def main() -> None:
                 print("No conversation yet. Nothing to compact.")
             else:
                 history = compactor.manual_compact(history, focus=focus)
+                save_session_history(HISTORY_SESSION_FILE, history)
                 print("[manual compact] conversation compressed.")
             print(render_active_selection(selected_skill, selected_subagent))
             print()
@@ -291,6 +368,8 @@ def main() -> None:
                     "or increasing RECURSION_LIMIT in .env."
                 )
             print(f"Error during agent invoke: {exc}")
+
+        save_session_history(HISTORY_SESSION_FILE, history)
 
         print(render_active_selection(selected_skill, selected_subagent))
         print()
